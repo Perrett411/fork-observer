@@ -1,0 +1,114 @@
+services:
+  app:
+    image: rust:1-alpine
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    env_file:
+      - /run/base44/app.env
+    environment:
+      - BASE44_PREVIEW_MODE
+      - RUST_LOG=info
+      - CONFIG_FILE=/app/config.toml
+    volumes:
+      - .:/app
+      - cargo_cache:/usr/local/cargo
+      - target_cache:/app/target
+      - fork_observer_data:/app/data
+    command:
+      - sh
+      - -ec
+      - |
+        apk add --no-cache musl-dev >/dev/null
+        mkdir -p /app/data
+        if [ ! -f /app/config.toml ]; then
+          MAINNET_TIP=$$(wget -qO- https://mempool.space/api/blocks/tip/height 2>/dev/null || echo 971448)
+          MAINNET_MIN=$$((MAINNET_TIP - 12))
+          SIGNET_TIP=$$(wget -qO- https://mempool.space/signet/api/blocks/tip/height 2>/dev/null || echo 326351)
+          SIGNET_MIN=$$((SIGNET_TIP - 8))
+          cat <<EOF > /app/config.toml
+        database_path = "/app/data/fork-observer.sqlite"
+        www_path = "./www"
+        query_interval = 10
+        address = "0.0.0.0:3000"
+        rss_base_url = "http://localhost:3000/"
+        footer_html = """
+            <div class="my-2">
+              <div>
+                <span class="text-muted">Monitoring public Bitcoin Mainnet &amp; Signet nodes</span>
+              </div>
+            </div>
+          """
+
+        [[networks]]
+        id = 1
+        name = "Mainnet"
+        description = "Bitcoin Mainnet monitored via public Electrum and Esplora backends."
+        min_fork_height = $${MAINNET_MIN}
+        max_interesting_heights = 100
+            [networks.pool_identification]
+            enable = true
+            network = "Mainnet"
+
+            [[networks.nodes]]
+            id = 1
+            name = "Electrum Emzy"
+            description = "Public Electrum server (electrum.emzy.de:50002)"
+            rpc_host = "ssl://electrum.emzy.de"
+            rpc_port = 50002
+            implementation = "electrum"
+
+            [[networks.nodes]]
+            id = 2
+            name = "Electrum Blockstream"
+            description = "Blockstream public Electrum server (electrum.blockstream.info:50002)"
+            rpc_host = "ssl://electrum.blockstream.info"
+            rpc_port = 50002
+            implementation = "electrum"
+
+            [[networks.nodes]]
+            id = 3
+            name = "mempool.space"
+            description = "mempool.space Esplora REST API"
+            rpc_host = "https://mempool.space/api"
+            implementation = "esplora"
+
+            [[networks.nodes]]
+            id = 4
+            name = "blockstream.info"
+            description = "Blockstream Esplora REST API"
+            rpc_host = "https://blockstream.info/api"
+            implementation = "esplora"
+
+        [[networks]]
+        id = 2
+        name = "Signet"
+        description = "Bitcoin Signet test network monitored via mempool.space Esplora API."
+        min_fork_height = $${SIGNET_MIN}
+        max_interesting_heights = 100
+            [networks.pool_identification]
+            enable = false
+            network = "Signet"
+
+            [[networks.nodes]]
+            id = 1
+            name = "mempool.space Signet"
+            description = "mempool.space Signet Esplora REST API"
+            rpc_host = "https://mempool.space/signet/api"
+            implementation = "esplora"
+        EOF
+        fi
+        cargo build --locked
+        exec cargo run --locked
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/networks.json >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
+    restart: on-failure
+
+volumes:
+  cargo_cache:
+  target_cache:
+  fork_observer_data:
