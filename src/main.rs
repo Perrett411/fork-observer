@@ -253,23 +253,11 @@ async fn main() -> Result<(), MainError> {
                                 }
                             };
 
-                        // Identify the miner of the new header(s)
-                        for hash in miners_needed.iter() {
-                            if let Err(e) = pool_id_tx_clone.send(*hash) {
-                                error!(
-                                    "Could not send a block hash into the pool identification channel: {}",
-                                    e
-                                );
-                            }
-                        }
-
                         last_tips = tips.clone();
                         let db_write = db_write.clone();
-                        // We want to avoid stripping the tree (strip_tree()) if it didn't change.
-                        // Keeping tracking of changes:
-                        let mut tree_changed = false;
+                        let mut _tree_changed = false;
                         if !new_headers.is_empty() {
-                            tree_changed =
+                            _tree_changed =
                                 insert_new_headers_into_tree(&tree_clone, &new_headers).await;
 
                             match db::write_to_db(&new_headers, db_write, network.id).await {
@@ -286,43 +274,60 @@ async fn main() -> Result<(), MainError> {
                             }
                         }
 
-                        // Update node tips in cache
+                        // Filter tips to those at or above min_fork_height
+                        let relevant_node_tips: Vec<ChainTip> = tips
+                            .iter()
+                            .filter(|t| t.height >= network.min_fork_height)
+                            .cloned()
+                            .collect();
+
+                        // Update node tips in cache first so tip_heights reflects all nodes' latest tips
                         update_cache(
                             &caches_clone,
                             network.id,
                             CacheUpdate::NodeTips {
                                 node_id: node.info().id,
-                                tips: tips.clone(),
+                                tips: relevant_node_tips,
                             },
                             &cache_changed_tx_cloned,
                         )
                         .await;
 
-                        if tree_changed {
-                            let mut tip_heights: BTreeSet<u64> =
-                                tip_heights(network.id, &caches_clone).await;
-                            for tip in tips.iter() {
-                                tip_heights.insert(tip.height);
+                        // Re-strip tree whenever tips or headers changed so interesting heights stay accurate
+                        let mut current_tip_heights: BTreeSet<u64> =
+                            tip_heights(network.id, &caches_clone).await;
+                        for tip in tips.iter() {
+                            if tip.height >= network.min_fork_height {
+                                current_tip_heights.insert(tip.height);
                             }
-                            let header_infos_json = headertree::strip_tree(
-                                &tree_clone,
-                                network.max_interesting_heights,
-                                tip_heights,
-                            )
-                            .await;
-                            let forks =
-                                headertree::recent_forks(&tree_clone, MAX_FORKS_IN_CACHE).await;
+                        }
+                        let header_infos_json = headertree::strip_tree(
+                            &tree_clone,
+                            network.max_interesting_heights,
+                            current_tip_heights,
+                        )
+                        .await;
+                        let forks = headertree::recent_forks(&tree_clone, MAX_FORKS_IN_CACHE).await;
 
-                            update_cache(
-                                &caches_clone,
-                                network.id,
-                                CacheUpdate::HeaderTree {
-                                    header_infos_json,
-                                    forks,
-                                },
-                                &cache_changed_tx_cloned,
-                            )
-                            .await;
+                        update_cache(
+                            &caches_clone,
+                            network.id,
+                            CacheUpdate::HeaderTree {
+                                header_infos_json,
+                                forks,
+                            },
+                            &cache_changed_tx_cloned,
+                        )
+                        .await;
+
+                        // Identify the miner of the new header(s) after inserting into tree and cache
+                        for hash in miners_needed.iter() {
+                            if let Err(e) = pool_id_tx_clone.send(*hash) {
+                                error!(
+                                    "Could not send a block hash into the pool identification channel: {}",
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -694,7 +699,7 @@ async fn update_cache(
                     header_info.header.block_hash().to_string(),
                     header_info.miner,
                 ));
-                if cache.recent_miners.len() > 5 {
+                if cache.recent_miners.len() > 25 {
                     cache.recent_miners.remove(0);
                 }
             });
@@ -719,30 +724,21 @@ async fn update_cache(
                 });
             }
 
+            let mut sorted_headers: Vec<HeaderInfoJson> =
+                new_header_infos_map.into_values().collect();
+            sorted_headers.sort_by_key(|h| h.id);
+
             locked_cache.entry(network_id).and_modify(|e| {
-                e.header_infos_json = new_header_infos_map
-                    .iter()
-                    .map(|(_, header)| header.clone())
-                    .collect();
+                e.header_infos_json = sorted_headers;
                 e.forks = forks;
             });
         }
         CacheUpdate::NodeTips { node_id, tips } => {
-            let min_height = match network.header_infos_json.iter().min_by_key(|h| h.height) {
-                Some(header) => header.height,
-                None => 0,
-            };
-            let relevant_tips: Vec<ChainTip> = tips
-                .iter()
-                .filter(|t| t.height >= min_height)
-                .cloned()
-                .collect();
-
             locked_cache.entry(network_id).and_modify(|network| {
                 network
                     .node_data
                     .entry(node_id)
-                    .and_modify(|e| e.tips(&relevant_tips));
+                    .and_modify(|e| e.tips(&tips));
             });
         }
         CacheUpdate::NodeReachability { node_id, reachable } => {
@@ -792,6 +788,15 @@ async fn load_node_version(node: BoxedSyncSendNode, network: &str) -> String {
             Err(e) => match e {
                 error::FetchError::BitcoinCoreRPC(JsonRpc(msg)) => {
                     warn!("Could not fetch getnetworkinfo from node='{}' on network '{}': {:?}. Retrying...", node.info().name, network, msg);
+                }
+                error::FetchError::EsploraREST(error::EsploraRESTError::NotImplemented)
+                | error::FetchError::BtcdRPC(error::JsonRPCError::NotImplemented) => {
+                    debug!(
+                        "Version query not implemented for node='{}' on network='{}'",
+                        node.info().name,
+                        network
+                    );
+                    return VERSION_UNKNOWN.to_string();
                 }
                 _ => {
                     error!(

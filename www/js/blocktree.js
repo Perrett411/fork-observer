@@ -98,8 +98,8 @@ function preprocess_data(data) {
   let last_height = 0;
   let index = 0;
   unique_heights.forEach( height => {
-    if (last_height + 1 > height) {
-      index +=1;
+    if (last_height != 0 && last_height + 1 < height) {
+      index += 1;
     }
     htoi[height] = index;
     index += 1;
@@ -120,7 +120,8 @@ function draw() {
   let data = state_data
   
   // nothing to draw if there are no headers
-  if (data.header_infos.length == 0) {
+  if (!data || !data.header_infos || data.header_infos.length == 0) {
+    g.selectAll("*").remove()
     return
   }
 
@@ -263,11 +264,7 @@ function draw() {
           .attr("transform", d => "translate(" + o.x(d, htoi) + "," + o.y(d, htoi) + ")")
         update.selectAll(".block-pool-name")
           .attr("transform", `rotate(${o.block_text_rotate},0,0)`)
-        update.selectAll(".node-indicator")
-           .filter(d => d.status == "in-chain")
-           .attr("transform", `rotate(${o.block_text_rotate},0,0)`)
-           .append("text")
-           .text("abcd")
+          .text(d => d.data.data.miner.length > 14 ? d.data.data.miner.substring(0, 14) + "…" : d.data.data.miner)
 
         update.raise()
         return update
@@ -280,6 +277,8 @@ function draw() {
     .join("g")
     .classed("node-tip-status-indicator", true)
     .attr("transform", d => "translate(" + o.x(d, htoi) + "," + o.y(d, htoi) + ")")
+
+  node_groups.selectAll("*").remove()
 
   let indicators = node_groups.selectAll("g")
     .data(d => d.data.data.status)
@@ -367,19 +366,17 @@ function gen_treemap(o, tips, unique_heights) {
 }
 
 function onBlockClick(c, d) {
-  let parentElement = d3.select(c.target.parentElement.parentElement)
-  // The on-click listener of the block propagates to the appened description elements.
-  // To prevent adding a second description element of the block we return early if the
-  // parentElement is not the block.
-  if (parentElement.attr("class") == null || !parentElement.attr("class").startsWith("block")) return
+  if (c.target.closest && c.target.closest(".block-description")) return
+  let parentElement = d3.select(c.currentTarget)
+  if (!parentElement.classed("block")) return
 
   if (parentElement.selectAll(".block-description").size() > 0) {
     parentElement.selectAll(".block-description").remove()
     parentElement.selectAll(".link-block-description").attr("d", "")
   } else {
+    parentElement.raise()
 
     const description_offset = { x: 50, y: -50 }
-    const description_margin = { x: 0, y: 15 }
     let descGroup = parentElement.append("g")
       .attr("class", "block-description")
       .attr("transform", "translate(" + description_offset.x + "," + description_offset.y / 2 + ")")
@@ -407,20 +404,18 @@ function onBlockClick(c, d) {
     }
     function dragended() { d3.select(this).attr("cursor", "drag"); }
 
-    let descCloseGroup = descGroup.append("g")
-
     let status_text = "";
     // block description: tip status for nodes
     if (d.data.data.status != "in-chain") {
-      d.data.data.status.reverse().forEach(status => {
+      [...d.data.data.status].reverse().forEach(status => {
         status_text += `<span class="text-monospace tip-status-color-fill-${status.status}">▆ </span>`
-        status_text += `<span>${status.count}x ${status.status}: ${status.nodes.map(n => n.name).join(", ")}`
+        status_text += `<span>${status.count}x ${status.status}: ${status.nodes.map(n => n.name).join(", ")}</span> `
       })
     }
 
 
-    function onBlockDescriptionCloseClick(c, d) {
-      let parentElement = d3.select(c.target.parentElement.parentElement.parentElement.parentElement.parentElement.parentElement)
+    function onBlockDescriptionCloseClick(c) {
+      c.stopPropagation()
       parentElement.selectAll(".block-description").remove()
       parentElement.selectAll(".link-block-description").attr("d", "")
     }
@@ -432,12 +427,12 @@ function onBlockClick(c, d) {
       .append("xhtml:div")
         .attr("class", "card m-0 p-0 border")
     let headerDiv = card.append("xhtml:div").attr("class", "card-header border")
-    headerDiv.append()
+    headerDiv.append("xhtml:span")
       .html(`<span>Header at height <span style="cursor: pointer" onClick='window.prompt("height:", "${d.data.data.height}")'>${d.data.data.height}</span></span>`)
-    headerDiv.append()
+    headerDiv.append("xhtml:span")
       .style("float", "right")
       .html(`<button class="btn btn-close"></button>`)
-      .on("click", (c, d) => onBlockDescriptionCloseClick(c, d));
+      .on("click", (c) => onBlockDescriptionCloseClick(c));
   
     card.append("div")
       .attr("class", "card-body")
@@ -491,13 +486,16 @@ function get_active_hash_or_fake(node) {
 }
 
 function ago(timestamp) {
+  if (!timestamp || timestamp <= 0) {
+    return "a long time ago"
+  }
   const rtf = new Intl.RelativeTimeFormat("en", {
     style: "narrow",
     numeric: "always",
   });
   const now = new Date()
-  const utc_seconds = (now.getTime() + now.getTimezoneOffset()*60) / 1000;
-  const seconds = parseInt(timestamp - utc_seconds);
+  const utc_seconds = now.getTime() / 1000;
+  const seconds = Math.min(0, parseInt(timestamp - utc_seconds));
   if (seconds > -90) {
     return rtf.format(seconds, "seconds");
   }
@@ -509,7 +507,7 @@ function ago(timestamp) {
   if (hours > -24) {
     return rtf.format(hours, "hours");
   }
-  const days = parseInt(hours/60);
+  const days = parseInt(hours/24);
   if (days > -30) {
     return rtf.format(days, "days");
   }
@@ -522,6 +520,7 @@ function ago(timestamp) {
 }
 
 async function draw_nodes() {
+  if (!state_data || !state_data.nodes) return;
   nodeInfoRow.html(null);
   nodeInfoRow.selectAll('.node-info')
     .data(state_data.nodes.sort((a, b) => get_active_height_or_0(a) - get_active_height_or_0(b)))

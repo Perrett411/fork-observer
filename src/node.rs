@@ -69,11 +69,9 @@ pub trait Node: Sync {
 
         let mut active_new_headers: Vec<HeaderInfo> =
             self.new_active_headers(tips, tree, min_fork_height).await?;
-        // We only want miners for active headers if they are (smaller) tip updates.
-        if active_new_headers.len() <= 20 {
-            for h in active_new_headers.iter() {
-                headers_needing_miners.push(h.header.block_hash());
-            }
+        // Identify miners for up to the 20 most recent active headers.
+        for h in active_new_headers.iter().rev().take(20) {
+            headers_needing_miners.push(h.header.block_hash());
         }
         new_headers.append(&mut active_new_headers);
 
@@ -108,22 +106,26 @@ pub trait Node: Sync {
                 )))
             }
         };
-        const STEP_SIZE: i64 = 2000;
+        const STEP_SIZE: i64 = 100;
         let mut query_height: i64 = active_tip.height as i64;
         loop {
+            if query_height < min_fork_height as i64 {
+                break;
+            }
             match self.capabilities().batch_header_fetch {
                 true => {
                     // We want to either start to query blocks at the `min_fork_height` or
                     // the `tip height - STEP_SIZE + 1` which ever is larger.
                     // (+ 1 as we would otherwise not query the tip)
                     let start_height = max(min_fork_height as i64, query_height - STEP_SIZE + 1);
+                    let count = (query_height - start_height + 1) as u64;
                     let mut already_knew_a_header = false;
                     // get the header hash for a header STEP_SIZE away from query_height
                     let header_hash = self.block_hash(start_height as u64).await?;
 
-                    // get STEP_SIZE headers
+                    // get count headers
                     let headers = self
-                        .batch_header_fetch(header_hash, start_height as u64, STEP_SIZE as u64)
+                        .batch_header_fetch(header_hash, start_height as u64, count)
                         .await?;
 
                     // zip heights and headers up and to iterate through them by descending height
@@ -207,14 +209,14 @@ pub trait Node: Sync {
 
         for inactive_tip in tips
             .iter()
-            .filter(|tip| tip.height - tip.branchlen as u64 > min_fork_height)
+            .filter(|tip| tip.height.saturating_sub(tip.branchlen as u64) > min_fork_height)
             .filter(|tip| tip.status != ChainTipStatus::Active)
         {
             let mut next_header = inactive_tip.block_hash();
             for i in 0..=inactive_tip.branchlen {
                 {
                     let tree_locked = tree.lock().await;
-                    if tree_locked.1.contains_key(&inactive_tip.block_hash()) {
+                    if tree_locked.1.contains_key(&next_header) {
                         break;
                     }
                 }
@@ -589,7 +591,7 @@ impl Node for Esplora {
 
         match res.status_code {
             200 => {
-                let header_str = res.as_str()?;
+                let header_str = res.as_str()?.trim();
                 match Vec::from_hex(header_str) {
                     Ok(header_bytes) => match bitcoin::consensus::deserialize(&header_bytes) {
                         Ok(header) => Ok(header),
@@ -633,29 +635,32 @@ impl Node for Esplora {
 
         match res.status_code {
             200 => {
-                let url = format!("{}/tx/{}/hex", self.api_url, res.as_str()?);
-                let coinbase_hex = res.as_str()?;
+                let txid = res.as_str()?.trim();
+                let url = format!("{}/tx/{}/hex", self.api_url, txid);
                 let res = minreq::get(url.clone())
                     .with_header("content-type", "plain/text")
                     .with_timeout(8)
                     .send()?;
 
                 match res.status_code {
-                    200 => match Vec::from_hex(coinbase_hex) {
-                        Ok(coinbase_bytes) => {
-                            match bitcoin::consensus::deserialize(&coinbase_bytes) {
-                                Ok(tx) => Ok(tx),
-                                Err(e) => Err(FetchError::DataError(format!(
-                                    "Can't deserialize coinbase transaction '{}': {}",
-                                    coinbase_hex, e
-                                ))),
+                    200 => {
+                        let coinbase_hex = res.as_str()?.trim();
+                        match Vec::from_hex(coinbase_hex) {
+                            Ok(coinbase_bytes) => {
+                                match bitcoin::consensus::deserialize(&coinbase_bytes) {
+                                    Ok(tx) => Ok(tx),
+                                    Err(e) => Err(FetchError::DataError(format!(
+                                        "Can't deserialize coinbase transaction '{}': {}",
+                                        coinbase_hex, e
+                                    ))),
+                                }
                             }
+                            Err(e) => Err(FetchError::DataError(format!(
+                                "Can't hex decode coinbase transaction '{}': {}",
+                                coinbase_hex, e
+                            ))),
                         }
-                        Err(e) => Err(FetchError::DataError(format!(
-                            "Can't hex decode coinbase transaction '{}': {}",
-                            coinbase_hex, e
-                        ))),
-                    },
+                    }
                     _ => {
                         return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
                             "HTTP request to {} failed: {} {}: {}",
@@ -689,7 +694,7 @@ impl Node for Esplora {
 
         match res.status_code {
             200 => {
-                let hash_str = res.as_str()?;
+                let hash_str = res.as_str()?.trim();
                 match BlockHash::from_str(hash_str) {
                     Ok(hash) => Ok(hash),
                     Err(e) => Err(FetchError::DataError(format!(
@@ -737,7 +742,7 @@ impl Node for Esplora {
 
         match res.status_code {
             200 => {
-                let height_str = res.as_str()?;
+                let height_str = res.as_str()?.trim();
                 match height_str.parse::<u64>() {
                     Ok(height) => {
                         let hash = self.block_hash(height).await?;
@@ -783,8 +788,9 @@ impl Electrum {
     }
 
     fn get_client(&self) -> &ElectrumClient {
+        static ELECTRUM_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         self.client.get_or_init(|| {
-            const ELECTRUM_RECONNECT_DURATION: Duration = Duration::from_secs(60);
+            const ELECTRUM_RECONNECT_DURATION: Duration = Duration::from_secs(3);
             let config = ElectrumClientConfigBuilder::new()
                 .timeout(Some(10))
                 .retry(2)
@@ -792,7 +798,11 @@ impl Electrum {
                 .build();
 
             loop {
-                match ElectrumClient::from_config(&self.url, config.clone()) {
+                let result = {
+                    let _guard = ELECTRUM_INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    ElectrumClient::from_config(&self.url, config.clone())
+                };
+                match result {
                     Ok(client) => {
                         log::info!(
                             "Connected to Electrum server {} ({})",
