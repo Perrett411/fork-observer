@@ -28,7 +28,9 @@ async function fetch_info() {
   await fetch(getInfo)
     .then(response => response.json())
     .then(info => {
-      footerCustom.html(info.footer)
+      if (!footerCustom.empty()) {
+        footerCustom.html(info.footer)
+      }
     }).catch(console.error);
 }
 
@@ -54,13 +56,14 @@ async function fetch_networks() {
 function update_network() {
   console.debug("called update_network()")
   let current_network = state_networks.filter(net => net.id == state_selected_network_id)[0]
+  if (!current_network) return;
   document.title = PAGE_NAME + " - " + current_network.name;
-  networkInfoName.text(current_network.name)
-  networkInfoDescription.text(current_network.description)
-  rssRecentForks.node().href = `rss/${current_network.id}/forks.xml`
-  rssInvalidBlocks.node().href = `rss/${current_network.id}/invalid.xml`
-  rssLaggingNodes.node().href = `rss/${current_network.id}/lagging.xml`
-  rssUnreachableNodes.node().href = `rss/${current_network.id}/unreachable.xml`
+  if (!networkInfoName.empty()) networkInfoName.text(current_network.name)
+  if (!networkInfoDescription.empty()) networkInfoDescription.text(current_network.description)
+  if (!rssRecentForks.empty()) rssRecentForks.node().href = `rss/${current_network.id}/forks.xml`
+  if (!rssInvalidBlocks.empty()) rssInvalidBlocks.node().href = `rss/${current_network.id}/invalid.xml`
+  if (!rssLaggingNodes.empty()) rssLaggingNodes.node().href = `rss/${current_network.id}/lagging.xml`
+  if (!rssUnreachableNodes.empty()) rssUnreachableNodes.node().href = `rss/${current_network.id}/unreachable.xml`
 }
 
 function set_initial_network() {
@@ -77,20 +80,26 @@ function set_initial_network() {
     state_selected_network_id = state_networks[0].id
   }
 
-  networkSelect.selectAll('option')
-    .data(state_networks)
-    .enter()
-      .append('option')
+  if (!networkSelect.empty()) {
+    networkSelect.selectAll('option')
+      .data(state_networks)
+      .join('option')
       .attr('value', d => d.id)
       .text(d => d.name)
       .property("selected", d => d.id == state_selected_network_id)
+  }
 }
 
-networkSelect.on("input", async function() {
-  state_selected_network_id = networkSelect.node().value
-  update_network()
-  await update()
-})
+if (!networkSelect.empty()) {
+  networkSelect.on("input", async function() {
+    state_selected_network_id = networkSelect.node().value
+    initialDraw = true
+    d3.selectAll(".block-description").remove()
+    d3.selectAll(".link-block-description").attr("d", "")
+    update_network()
+    await update()
+  })
+}
 
 async function update() {
   console.debug("called update()")

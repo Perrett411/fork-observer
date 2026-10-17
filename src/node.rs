@@ -69,11 +69,9 @@ pub trait Node: Sync {
 
         let mut active_new_headers: Vec<HeaderInfo> =
             self.new_active_headers(tips, tree, min_fork_height).await?;
-        // We only want miners for active headers if they are (smaller) tip updates.
-        if active_new_headers.len() <= 20 {
-            for h in active_new_headers.iter() {
-                headers_needing_miners.push(h.header.block_hash());
-            }
+        // Identify miners for up to the 20 most recent active headers near the tip.
+        for h in active_new_headers.iter().rev().take(20) {
+            headers_needing_miners.push(h.header.block_hash());
         }
         new_headers.append(&mut active_new_headers);
 
@@ -108,15 +106,26 @@ pub trait Node: Sync {
                 )))
             }
         };
+        {
+            let locked_tree = tree.lock().await;
+            if locked_tree.1.contains_key(&active_tip.block_hash()) {
+                return Ok(new_headers);
+            }
+        }
         const STEP_SIZE: i64 = 2000;
+        const MAX_INITIAL_SPAN: i64 = 12;
+        let effective_min_fork_height = max(
+            min_fork_height as i64,
+            active_tip.height as i64 - MAX_INITIAL_SPAN,
+        );
         let mut query_height: i64 = active_tip.height as i64;
         loop {
             match self.capabilities().batch_header_fetch {
                 true => {
-                    // We want to either start to query blocks at the `min_fork_height` or
+                    // We want to either start to query blocks at the `effective_min_fork_height` or
                     // the `tip height - STEP_SIZE + 1` which ever is larger.
                     // (+ 1 as we would otherwise not query the tip)
-                    let start_height = max(min_fork_height as i64, query_height - STEP_SIZE + 1);
+                    let start_height = max(effective_min_fork_height, query_height - STEP_SIZE + 1);
                     let mut already_knew_a_header = false;
                     // get the header hash for a header STEP_SIZE away from query_height
                     let header_hash = self.block_hash(start_height as u64).await?;
@@ -182,7 +191,7 @@ pub trait Node: Sync {
                 }
             }
 
-            if query_height < min_fork_height as i64 {
+            if query_height < effective_min_fork_height {
                 break;
             }
         }
@@ -633,15 +642,17 @@ impl Node for Esplora {
 
         match res.status_code {
             200 => {
-                let url = format!("{}/tx/{}/hex", self.api_url, res.as_str()?);
-                let coinbase_hex = res.as_str()?;
+                let txid = res.as_str()?.trim();
+                let url = format!("{}/tx/{}/hex", self.api_url, txid);
                 let res = minreq::get(url.clone())
                     .with_header("content-type", "plain/text")
                     .with_timeout(8)
                     .send()?;
 
                 match res.status_code {
-                    200 => match Vec::from_hex(coinbase_hex) {
+                    200 => {
+                        let coinbase_hex = res.as_str()?.trim();
+                        match Vec::from_hex(coinbase_hex) {
                         Ok(coinbase_bytes) => {
                             match bitcoin::consensus::deserialize(&coinbase_bytes) {
                                 Ok(tx) => Ok(tx),
@@ -655,7 +666,8 @@ impl Node for Esplora {
                             "Can't hex decode coinbase transaction '{}': {}",
                             coinbase_hex, e
                         ))),
-                    },
+                    }
+                    }
                     _ => {
                         return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
                             "HTTP request to {} failed: {} {}: {}",

@@ -157,8 +157,16 @@ pub async fn forks_response(
                         network_name
                     )
                     .to_string(),
-                    link: format!("{}?network={}?src=forks-rss", base_url.clone(), network_id),
-                    href: format!("{}/rss/{}/forks.xml", base_url, network_id),
+                    link: format!(
+                        "{}/?network={}&amp;src=forks-rss",
+                        base_url.trim_end_matches('/'),
+                        network_id
+                    ),
+                    href: format!(
+                        "{}/rss/{}/forks.xml",
+                        base_url.trim_end_matches('/'),
+                        network_id
+                    ),
                     items: cache.forks.iter().map(|f| f.clone().into()).collect(),
                 },
             };
@@ -256,8 +264,16 @@ pub async fn lagging_nodes_response(
                         network_name
                     )
                     .to_string(),
-                    link: format!("{}?network={}?src=lagging-rss", base_url.clone(), network_id),
-                    href: format!("{}/rss/{}/lagging.xml", base_url, network_id),
+                    link: format!(
+                        "{}/?network={}&amp;src=lagging-rss",
+                        base_url.trim_end_matches('/'),
+                        network_id
+                    ),
+                    href: format!(
+                        "{}/rss/{}/lagging.xml",
+                        base_url.trim_end_matches('/'),
+                        network_id
+                    ),
                     items: lagging_nodes,
                 },
             };
@@ -314,11 +330,15 @@ pub async fn invalid_blocks_response(
                         network_name
                     ),
                     link: format!(
-                        "{}?network={}?src=invalid-rss",
-                        base_url.clone(),
+                        "{}/?network={}&amp;src=invalid-rss",
+                        base_url.trim_end_matches('/'),
                         network_id
                     ),
-                    href: format!("{}/rss/{}/invalid.xml", base_url, network_id),
+                    href: format!(
+                        "{}/rss/{}/invalid.xml",
+                        base_url.trim_end_matches('/'),
+                        network_id
+                    ),
                     items: invalid_blocks
                         .iter()
                         .map(|(tipinfo, nodes)| (*tipinfo, *nodes).into())
@@ -368,11 +388,15 @@ pub async fn unreachable_nodes_response(
                         network_name
                     ),
                     link: format!(
-                        "{}?network={}?src=unreachable-nodes",
-                        base_url.clone(),
+                        "{}/?network={}&amp;src=unreachable-nodes",
+                        base_url.trim_end_matches('/'),
                         network_id
                     ),
-                    href: format!("{}/rss/{}/unreachable.xml", base_url, network_id),
+                    href: format!(
+                        "{}/rss/{}/unreachable.xml",
+                        base_url.trim_end_matches('/'),
+                        network_id
+                    ),
                     items: unreachable_node_items,
                 },
             };

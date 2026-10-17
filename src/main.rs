@@ -153,15 +153,12 @@ async fn main() -> Result<(), MainError> {
 
         populate_cache(&network, &tree, &caches).await;
 
-        for node in network.nodes.iter().cloned() {
+        for (node_idx, node) in network.nodes.iter().cloned().enumerate() {
             let network = network.clone();
-            // Spread query times equally apart to even out network/CPU load
+            // Stagger initial node queries slightly so the first node populates shared headers
+            // before subsequent nodes on the same network check their tips.
             let mut interval = interval_at(
-                Instant::now()
-                    + Duration::from_millis(
-                        (config.query_interval.as_millis() / network.nodes.len() as u128) as u64,
-                    )
-                    + Duration::from_secs((network.id % 10) as u64),
+                Instant::now() + Duration::from_millis((node_idx as u64) * 400),
                 config.query_interval,
             );
             let db_write = db.clone();
@@ -286,19 +283,25 @@ async fn main() -> Result<(), MainError> {
                             }
                         }
 
-                        // Update node tips in cache
-                        update_cache(
-                            &caches_clone,
-                            network.id,
-                            CacheUpdate::NodeTips {
-                                node_id: node.info().id,
-                                tips: tips.clone(),
-                            },
-                            &cache_changed_tx_cloned,
-                        )
-                        .await;
+                        let needs_tree_refresh = if tree_changed {
+                            true
+                        } else {
+                            let locked_cache = caches_clone.lock().await;
+                            match locked_cache.get(&network.id) {
+                                Some(net_cache) => {
+                                    net_cache.header_infos_json.is_empty()
+                                        || tips.iter().any(|t| {
+                                            !net_cache
+                                                .header_infos_json
+                                                .iter()
+                                                .any(|h| h.hash == t.hash)
+                                        })
+                                }
+                                None => true,
+                            }
+                        };
 
-                        if tree_changed {
+                        if needs_tree_refresh {
                             let mut tip_heights: BTreeSet<u64> =
                                 tip_heights(network.id, &caches_clone).await;
                             for tip in tips.iter() {
@@ -324,6 +327,18 @@ async fn main() -> Result<(), MainError> {
                             )
                             .await;
                         }
+
+                        // Update node tips in cache after HeaderTree is up to date
+                        update_cache(
+                            &caches_clone,
+                            network.id,
+                            CacheUpdate::NodeTips {
+                                node_id: node.info().id,
+                                tips: tips.clone(),
+                            },
+                            &cache_changed_tx_cloned,
+                        )
+                        .await;
                     }
                 }
             });
@@ -719,11 +734,13 @@ async fn update_cache(
                 });
             }
 
+            let mut sorted_headers: Vec<HeaderInfoJson> = new_header_infos_map
+                .into_values()
+                .collect();
+            sorted_headers.sort_by_key(|h| h.id);
+
             locked_cache.entry(network_id).and_modify(|e| {
-                e.header_infos_json = new_header_infos_map
-                    .iter()
-                    .map(|(_, header)| header.clone())
-                    .collect();
+                e.header_infos_json = sorted_headers;
                 e.forks = forks;
             });
         }
@@ -793,8 +810,17 @@ async fn load_node_version(node: BoxedSyncSendNode, network: &str) -> String {
                 error::FetchError::BitcoinCoreRPC(JsonRpc(msg)) => {
                     warn!("Could not fetch getnetworkinfo from node='{}' on network '{}': {:?}. Retrying...", node.info().name, network, msg);
                 }
+                error::FetchError::EsploraREST(error::EsploraRESTError::NotImplemented)
+                | error::FetchError::BtcdRPC(error::JsonRPCError::NotImplemented) => {
+                    debug!(
+                        "Version query not supported by implementation for node='{}' on network='{}'",
+                        node.info().name,
+                        network
+                    );
+                    return VERSION_UNKNOWN.to_string();
+                }
                 _ => {
-                    error!(
+                    warn!(
                         "Could not load version from node='{}' on network='{}': {:?}",
                         node.info().name,
                         network,

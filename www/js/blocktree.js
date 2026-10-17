@@ -120,7 +120,8 @@ function draw() {
   let data = state_data
   
   // nothing to draw if there are no headers
-  if (data.header_infos.length == 0) {
+  if (!data || !data.header_infos || data.header_infos.length == 0) {
+    g.selectAll("*").remove()
     return
   }
 
@@ -316,7 +317,9 @@ function draw() {
   let svgSize = d3.select("#drawing-area").node().getBoundingClientRect();
   zoom.translateTo(svg.transition(d3.transition().duration(initialDraw ? 0 : 750)), offset_x, offset_y, [(svgSize.width)/2, (svgSize.height)/2])
   
-  svg.select("#legend").attr("x", svg.node().clientWidth - 150 - 10)
+  if (!svg.select("#legend").empty()) {
+    svg.select("#legend").attr("x", svg.node().clientWidth - 150 - 10)
+  }
   
   initialDraw = false
 }
@@ -491,29 +494,31 @@ function get_active_hash_or_fake(node) {
 }
 
 function ago(timestamp) {
+  if (!timestamp || timestamp <= 0) {
+    return "never";
+  }
   const rtf = new Intl.RelativeTimeFormat("en", {
     style: "narrow",
     numeric: "always",
   });
-  const now = new Date()
-  const utc_seconds = (now.getTime() + now.getTimezoneOffset()*60) / 1000;
-  const seconds = parseInt(timestamp - utc_seconds);
+  const utc_seconds = Date.now() / 1000;
+  const seconds = Math.min(0, parseInt(timestamp - utc_seconds));
   if (seconds > -90) {
     return rtf.format(seconds, "seconds");
   }
-  const minutes = parseInt(seconds/60);
+  const minutes = parseInt(seconds / 60);
   if (minutes > -60) {
     return rtf.format(minutes, "minutes");
   }
-  const hours = parseInt(minutes/60);
+  const hours = parseInt(minutes / 60);
   if (hours > -24) {
     return rtf.format(hours, "hours");
   }
-  const days = parseInt(hours/60);
+  const days = parseInt(hours / 24);
   if (days > -30) {
     return rtf.format(days, "days");
   }
-  const months = parseInt(days/31);
+  const months = parseInt(days / 31);
   if (months > -12) {
     return rtf.format(months, "months");
   }
@@ -522,6 +527,7 @@ function ago(timestamp) {
 }
 
 async function draw_nodes() {
+  if (nodeInfoRow.empty() || !state_data || !state_data.nodes) return;
   nodeInfoRow.html(null);
   nodeInfoRow.selectAll('.node-info')
     .data(state_data.nodes.sort((a, b) => get_active_height_or_0(a) - get_active_height_or_0(b)))
@@ -538,7 +544,7 @@ async function draw_nodes() {
         </h5>
         <div class="px-2 small">
           ${d.reachable ? "": "<span class='badge text-bg-danger'>unreachable</span>"}
-          <span class='badge text-bg-secondary small'>${d.implementation} ${d.version.replaceAll("/", "").replaceAll("Satoshi:", "").replace("unknown", "(version unknown)")}</span>
+          <span class='badge text-bg-secondary small d-inline-block text-truncate mw-100' title="${d.implementation} ${d.version.replaceAll("/", "").replaceAll("Satoshi:", "").replace("unknown", "(version unknown)")}">${d.implementation} ${d.version.replaceAll("/", "").replaceAll("Satoshi:", "").replace("unknown", "(version unknown)")}</span>
         </div>
         
         <div class="px-2">
