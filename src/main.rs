@@ -118,7 +118,7 @@ async fn populate_cache(network: &config::Network, tree: &Tree, caches: &Caches)
 
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info,warp::server=off")).init();
     let (config, db, caches) = startup().await?;
 
     // A channel to notify about changes via ServerSentEvents to clients.

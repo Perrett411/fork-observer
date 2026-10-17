@@ -164,7 +164,11 @@ pub trait Node: Sync {
                 }
                 false => {
                     // using RPC, not using REST
-                    let header_hash = self.block_hash(query_height as u64).await?;
+                    let header_hash = if query_height == active_tip.height as i64 {
+                        active_tip.block_hash()
+                    } else {
+                        self.block_hash(query_height as u64).await?
+                    };
                     {
                         let locked_tree = tree.lock().await;
                         if locked_tree.1.contains_key(&header_hash) {
@@ -561,9 +565,44 @@ pub struct Esplora {
     api_url: String,
 }
 
+#[derive(serde::Deserialize)]
+struct EsploraBlockSummary {
+    id: String,
+    height: u64,
+}
+
 impl Esplora {
     pub fn new(info: NodeInfo, api_url: String) -> Self {
         Esplora { info, api_url }
+    }
+
+    fn get_text_with_retry(&self, url: &str) -> Result<String, FetchError> {
+        let mut last_err = None;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                sleep(Duration::from_millis(400 * attempt as u64));
+            }
+            match minreq::get(url)
+                .with_header("content-type", "plain/text")
+                .with_timeout(8)
+                .send()
+            {
+                Ok(res) => {
+                    if res.status_code == 200 {
+                        return Ok(res.as_str()?.to_string());
+                    }
+                    let body = res.as_str().unwrap_or_default().to_string();
+                    last_err = Some(FetchError::EsploraREST(EsploraRESTError::Http(format!(
+                        "HTTP request to {} failed: {} {}: {}",
+                        url, res.status_code, res.reason_phrase, body
+                    ))));
+                }
+                Err(e) => {
+                    last_err = Some(FetchError::from(e));
+                }
+            }
+        }
+        Err(last_err.unwrap())
     }
 }
 
@@ -590,38 +629,20 @@ impl Node for Esplora {
 
     async fn block_header_hash(&self, hash: &BlockHash) -> Result<Header, FetchError> {
         let url = format!("{}/block/{}/header", self.api_url, hash);
-
-        let res = minreq::get(url.clone())
-            .with_header("content-type", "plain/text")
-            .with_timeout(8)
-            .send()?;
-
-        match res.status_code {
-            200 => {
-                let header_str = res.as_str()?;
-                match Vec::from_hex(header_str) {
-                    Ok(header_bytes) => match bitcoin::consensus::deserialize(&header_bytes) {
-                        Ok(header) => Ok(header),
-                        Err(e) => Err(FetchError::DataError(format!(
-                            "Can't deserialize block header '{}': {}",
-                            header_str, e
-                        ))),
-                    },
-                    Err(e) => Err(FetchError::DataError(format!(
-                        "Can't hex decode block header '{}': {}",
-                        header_str, e
-                    ))),
-                }
-            }
-            _ => {
-                return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
-                    "HTTP request to {} failed: {} {}: {}",
-                    url,
-                    res.status_code,
-                    res.reason_phrase,
-                    res.as_str()?
-                ))));
-            }
+        let header_str = self.get_text_with_retry(&url)?;
+        let header_str = header_str.trim();
+        match Vec::from_hex(header_str) {
+            Ok(header_bytes) => match bitcoin::consensus::deserialize(&header_bytes) {
+                Ok(header) => Ok(header),
+                Err(e) => Err(FetchError::DataError(format!(
+                    "Can't deserialize block header '{}': {}",
+                    header_str, e
+                ))),
+            },
+            Err(e) => Err(FetchError::DataError(format!(
+                "Can't hex decode block header '{}': {}",
+                header_str, e
+            ))),
         }
     }
 
@@ -634,91 +655,37 @@ impl Node for Esplora {
 
     async fn coinbase(&self, hash: &BlockHash, _height: u64) -> Result<Transaction, FetchError> {
         let url = format!("{}/block/{}/txid/0", self.api_url, hash);
+        let txid = self.get_text_with_retry(&url)?;
+        let txid = txid.trim();
 
-        let res = minreq::get(url.clone())
-            .with_header("content-type", "plain/text")
-            .with_timeout(8)
-            .send()?;
-
-        match res.status_code {
-            200 => {
-                let txid = res.as_str()?.trim();
-                let url = format!("{}/tx/{}/hex", self.api_url, txid);
-                let res = minreq::get(url.clone())
-                    .with_header("content-type", "plain/text")
-                    .with_timeout(8)
-                    .send()?;
-
-                match res.status_code {
-                    200 => {
-                        let coinbase_hex = res.as_str()?.trim();
-                        match Vec::from_hex(coinbase_hex) {
-                        Ok(coinbase_bytes) => {
-                            match bitcoin::consensus::deserialize(&coinbase_bytes) {
-                                Ok(tx) => Ok(tx),
-                                Err(e) => Err(FetchError::DataError(format!(
-                                    "Can't deserialize coinbase transaction '{}': {}",
-                                    coinbase_hex, e
-                                ))),
-                            }
-                        }
-                        Err(e) => Err(FetchError::DataError(format!(
-                            "Can't hex decode coinbase transaction '{}': {}",
-                            coinbase_hex, e
-                        ))),
-                    }
-                    }
-                    _ => {
-                        return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
-                            "HTTP request to {} failed: {} {}: {}",
-                            url,
-                            res.status_code,
-                            res.reason_phrase,
-                            res.as_str()?
-                        ))));
-                    }
-                }
-            }
-            _ => {
-                return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
-                    "HTTP request to {} failed: {} {}: {}",
-                    url,
-                    res.status_code,
-                    res.reason_phrase,
-                    res.as_str()?
-                ))));
-            }
+        let tx_url = format!("{}/tx/{}/hex", self.api_url, txid);
+        let coinbase_hex = self.get_text_with_retry(&tx_url)?;
+        let coinbase_hex = coinbase_hex.trim();
+        match Vec::from_hex(coinbase_hex) {
+            Ok(coinbase_bytes) => match bitcoin::consensus::deserialize(&coinbase_bytes) {
+                Ok(tx) => Ok(tx),
+                Err(e) => Err(FetchError::DataError(format!(
+                    "Can't deserialize coinbase transaction '{}': {}",
+                    coinbase_hex, e
+                ))),
+            },
+            Err(e) => Err(FetchError::DataError(format!(
+                "Can't hex decode coinbase transaction '{}': {}",
+                coinbase_hex, e
+            ))),
         }
     }
 
     async fn block_hash(&self, height: u64) -> Result<BlockHash, FetchError> {
         let url = format!("{}/block-height/{}", self.api_url, height);
-
-        let res = minreq::get(url.clone())
-            .with_header("content-type", "plain/text")
-            .with_timeout(8)
-            .send()?;
-
-        match res.status_code {
-            200 => {
-                let hash_str = res.as_str()?;
-                match BlockHash::from_str(hash_str) {
-                    Ok(hash) => Ok(hash),
-                    Err(e) => Err(FetchError::DataError(format!(
-                        "Invalid block hash '{}': {}",
-                        hash_str, e
-                    ))),
-                }
-            }
-            _ => {
-                return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
-                    "HTTP request to {} failed: {} {}: {}",
-                    url,
-                    res.status_code,
-                    res.reason_phrase,
-                    res.as_str()?
-                ))));
-            }
+        let hash_str = self.get_text_with_retry(&url)?;
+        let hash_str = hash_str.trim();
+        match BlockHash::from_str(hash_str) {
+            Ok(hash) => Ok(hash),
+            Err(e) => Err(FetchError::DataError(format!(
+                "Invalid block hash '{}': {}",
+                hash_str, e
+            ))),
         }
     }
 
@@ -735,46 +702,41 @@ impl Node for Esplora {
     }
 
     async fn tips(&self) -> Result<Vec<ChainTip>, FetchError> {
-        // https://mempool.space/api/blocks/tip/height
-        // The Esplora API doesn't have an endpoint similar to getchaintips.
-        // However, we can get the active tip and "fake" a getchaintips result.
-        // This only properly works with at least one other Bitcoin Core or btcd
-        // backend for the same network.
-        let url = format!("{}/blocks/tip/height", self.api_url);
-
-        let res = minreq::get(url.clone())
-            .with_header("content-type", "plain/text")
-            .with_timeout(8)
-            .send()?;
-
-        match res.status_code {
-            200 => {
-                let height_str = res.as_str()?;
-                match height_str.parse::<u64>() {
-                    Ok(height) => {
-                        let hash = self.block_hash(height).await?;
-                        Ok(vec![ChainTip {
-                            height,
-                            hash: hash.to_string(),
+        // Fetch the most recent blocks atomically from /blocks so height and hash
+        // come from the same backend replica behind load-balanced Esplora APIs.
+        let blocks_url = format!("{}/blocks", self.api_url);
+        if let Ok(body) = self.get_text_with_retry(&blocks_url) {
+            if let Ok(blocks) = serde_json::from_str::<Vec<EsploraBlockSummary>>(&body) {
+                if let Some(tip) = blocks.first() {
+                    if BlockHash::from_str(&tip.id).is_ok() {
+                        return Ok(vec![ChainTip {
+                            height: tip.height,
+                            hash: tip.id.clone(),
                             branchlen: 0,
                             status: ChainTipStatus::Active,
-                        }])
+                        }]);
                     }
-                    Err(e) => Err(FetchError::DataError(format!(
-                        "Invalid block height '{}': {}",
-                        height_str, e
-                    ))),
                 }
             }
-            _ => {
-                return Err(FetchError::EsploraREST(EsploraRESTError::Http(format!(
-                    "HTTP request to {} failed: {} {}: {}",
-                    url,
-                    res.status_code,
-                    res.reason_phrase,
-                    res.as_str()?
-                ))));
+        }
+
+        // Fallback to /blocks/tip/height + /block-height/{height}
+        let url = format!("{}/blocks/tip/height", self.api_url);
+        let height_str = self.get_text_with_retry(&url)?;
+        match height_str.trim().parse::<u64>() {
+            Ok(height) => {
+                let hash = self.block_hash(height).await?;
+                Ok(vec![ChainTip {
+                    height,
+                    hash: hash.to_string(),
+                    branchlen: 0,
+                    status: ChainTipStatus::Active,
+                }])
             }
+            Err(e) => Err(FetchError::DataError(format!(
+                "Invalid block height '{}': {}",
+                height_str, e
+            ))),
         }
     }
 }

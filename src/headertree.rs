@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use crate::types::{Fork, HeaderInfoJson, Tree};
 
-use log::{debug, warn};
+use log::debug;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::{Dfs, EdgeRef};
 
@@ -14,7 +14,7 @@ pub async fn sorted_interesting_heights(
 ) -> Vec<u64> {
     let tree_locked = tree.lock().await;
     if tree_locked.0.node_count() == 0 {
-        warn!("tried to collapse an empty tree!");
+        debug!("tried to collapse an empty tree!");
         return vec![];
     }
 
