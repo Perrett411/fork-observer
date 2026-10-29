@@ -144,7 +144,7 @@ text.block-miner {
 }
 
 .tip-status-color-background-active { background-color: var(--tip-status-color-active); }
-.tip-status-color-background-invalid { background-color: var(--tip-status-color-invalid); color: }
+.tip-status-color-background-invalid { background-color: var(--tip-status-color-invalid); }
 .tip-status-color-background-valid-fork { background-color: var(--tip-status-color-valid-fork); }
 .tip-status-color-background-valid-headers { background-color: var(--tip-status-color-valid-headers); }
 .tip-status-color-background-headers-only { background-color: var(--tip-status-color-headers-only); }

@@ -54,13 +54,14 @@ async function fetch_networks() {
 function update_network() {
   console.debug("called update_network()")
   let current_network = state_networks.filter(net => net.id == state_selected_network_id)[0]
+  if (!current_network) return
   document.title = PAGE_NAME + " - " + current_network.name;
   networkInfoName.text(current_network.name)
   networkInfoDescription.text(current_network.description)
-  rssRecentForks.node().href = `rss/${current_network.id}/forks.xml`
-  rssInvalidBlocks.node().href = `rss/${current_network.id}/invalid.xml`
-  rssLaggingNodes.node().href = `rss/${current_network.id}/lagging.xml`
-  rssUnreachableNodes.node().href = `rss/${current_network.id}/unreachable.xml`
+  rssRecentForks.attr("href", `rss/${current_network.id}/forks.xml`)
+  rssInvalidBlocks.attr("href", `rss/${current_network.id}/invalid.xml`)
+  rssLaggingNodes.attr("href", `rss/${current_network.id}/lagging.xml`)
+  rssUnreachableNodes.attr("href", `rss/${current_network.id}/unreachable.xml`)
 }
 
 function set_initial_network() {
@@ -88,6 +89,8 @@ function set_initial_network() {
 
 networkSelect.on("input", async function() {
   state_selected_network_id = networkSelect.node().value
+  initialDraw = true
+  g.selectAll("*").remove()
   update_network()
   await update()
 })
