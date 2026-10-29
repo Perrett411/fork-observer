@@ -162,6 +162,12 @@ text.block-miner {
   vertical-align: text-bottom;
 }
 
+.empty-state, .loading-state {
+  fill: var(--text-color);
+  font-size: 16px;
+  opacity: 0.7;
+}
+
 @-webkit-keyframes pulse {
   0% {
     opacity: 1;

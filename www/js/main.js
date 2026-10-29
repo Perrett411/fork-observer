@@ -90,8 +90,17 @@ function set_initial_network() {
 networkSelect.on("input", async function() {
   state_selected_network_id = networkSelect.node().value
   initialDraw = true
+  resetZoom()
   g.selectAll("*").remove()
   update_network()
+  // Show a loading indicator while fetching the new network's data
+  g.append("text")
+    .attr("class", "loading-state")
+    .attr("x", svg.node().clientWidth / 2)
+    .attr("y", svg.node().clientHeight / 2)
+    .attr("text-anchor", "middle")
+    .attr("dy", ".35em")
+    .text("Loading network data…")
   await update()
 })
 

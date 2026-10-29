@@ -49,6 +49,12 @@ svg.call(zoom)
 let g = svg
     .append("g")
 
+// Resets zoom and pan to the default identity transform.
+// Called on network switch so each network starts at a clean, centered view.
+function resetZoom() {
+  svg.call(zoom.transform, d3.zoomIdentity)
+}
+
 function preprocess_data(data) {  
   let header_infos = data.header_infos;
   let tip_infos = [];
@@ -118,10 +124,17 @@ function preprocess_data(data) {
 
 function draw() {
   let data = state_data
-  
+
   // nothing to draw if there are no headers
   if (!data || !data.header_infos || data.header_infos.length == 0) {
     g.selectAll("*").remove()
+    g.append("text")
+      .attr("class", "empty-state")
+      .attr("x", svg.node().clientWidth / 2)
+      .attr("y", svg.node().clientHeight / 2)
+      .attr("text-anchor", "middle")
+      .attr("dy", ".35em")
+      .text("No header data available for this network yet.")
     return
   }
 
