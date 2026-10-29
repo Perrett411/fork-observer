@@ -944,3 +944,286 @@ impl Node for Electrum {
             .headers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ChainTip, ChainTipStatus, Tree};
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+
+    /// Maximum headers an Electrum server will return in a single response.
+    const ELECTRUM_MAX_HEADERS: u64 = 150;
+
+    /// The STEP_SIZE used by `new_active_headers` for batch fetching.
+    /// Must stay under ELECTRUM_MAX_HEADERS to avoid Electrum truncation.
+    const STEP_SIZE: u64 = 100;
+
+    /// Creates a valid 80-byte Bitcoin block header with the given nonce.
+    /// All other fields are zeroed (version=1 for the first 4 bytes).
+    fn make_header(nonce: u32) -> Header {
+        let mut bytes = [0u8; 80];
+        // version = 1
+        bytes[0..4].copy_from_slice(&1u32.to_le_bytes());
+        // nonce at byte offset 76
+        bytes[76..80].copy_from_slice(&nonce.to_le_bytes());
+        bitcoin::consensus::deserialize(&bytes).expect("valid header bytes")
+    }
+
+    /// A mock node that tracks every `batch_header_fetch` call's (start_height, count)
+    /// pair, so tests can verify the batch sizes stay under the Electrum 150-header limit.
+    struct MockNode {
+        tip_height: u64,
+        batch_calls: StdMutex<Vec<(u64, u64)>>,
+    }
+
+    impl MockNode {
+        fn new(tip_height: u64) -> Self {
+            MockNode {
+                tip_height,
+                batch_calls: StdMutex::new(vec![]),
+            }
+        }
+
+        fn batch_calls(&self) -> Vec<(u64, u64)> {
+            self.batch_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Node for MockNode {
+        fn info(&self) -> NodeInfo {
+            NodeInfo {
+                id: 0,
+                name: "Mock".to_string(),
+                description: "Mock node for testing".to_string(),
+                implementation: "mock".to_string(),
+            }
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            // Use the same capabilities as Electrum: batch fetch enabled, fetch by height.
+            Capabilities {
+                header_fetch_type: HeaderFetchType::Height,
+                batch_header_fetch: true,
+            }
+        }
+
+        fn rpc_url(&self) -> String {
+            "mock".to_string()
+        }
+
+        async fn version(&self) -> Result<String, FetchError> {
+            Ok("mock-1.0".to_string())
+        }
+
+        async fn block_header_hash(&self, _hash: &BlockHash) -> Result<Header, FetchError> {
+            Ok(make_header(0))
+        }
+
+        async fn block_header_height(&self, height: u64) -> Result<Header, FetchError> {
+            Ok(make_header(height as u32))
+        }
+
+        async fn block_hash(&self, height: u64) -> Result<BlockHash, FetchError> {
+            Ok(make_header(height as u32).block_hash())
+        }
+
+        async fn tips(&self) -> Result<Vec<ChainTip>, FetchError> {
+            let hash = make_header(self.tip_height as u32).block_hash();
+            Ok(vec![ChainTip {
+                height: self.tip_height,
+                hash: hash.to_string(),
+                branchlen: 0,
+                status: ChainTipStatus::Active,
+            }])
+        }
+
+        async fn coinbase(
+            &self,
+            _hash: &BlockHash,
+            _height: u64,
+        ) -> Result<Transaction, FetchError> {
+            Err(FetchError::DataError("not implemented in mock".to_string()))
+        }
+
+        async fn batch_header_fetch(
+            &self,
+            _start_hash: BlockHash,
+            start_height: u64,
+            count: u64,
+        ) -> Result<Vec<Header>, FetchError> {
+            self.batch_calls
+                .lock()
+                .unwrap()
+                .push((start_height, count));
+            Ok((0..count)
+                .map(|i| make_header((start_height + i) as u32))
+                .collect())
+        }
+    }
+
+    fn empty_tree() -> Tree {
+        Arc::new(tokio::sync::Mutex::new((
+            petgraph::graph::DiGraph::new(),
+            std::collections::HashMap::new(),
+        )))
+    }
+
+    /// Runs `new_active_headers` on a mock node with the given tip height and
+    /// min_fork_height, returning the recorded (start_height, count) pairs.
+    async fn run_batch_test(tip_height: u64, min_fork_height: u64) -> Vec<(u64, u64)> {
+        let node = MockNode::new(tip_height);
+        let tree = empty_tree();
+        let tips = node.tips().await.unwrap();
+        node.new_active_headers(&tips, &tree, min_fork_height)
+            .await
+            .unwrap();
+        node.batch_calls()
+    }
+
+    // --- Mainnet: high tip height ---
+
+    #[tokio::test]
+    async fn test_batch_count_under_limit_mainnet() {
+        // Mainnet-like tip height (~860,000) with a 1,000-block window
+        let calls = run_batch_test(860_000, 859_000).await;
+        assert!(!calls.is_empty(), "expected at least one batch fetch");
+        for &(start, count) in &calls {
+            assert!(
+                count <= STEP_SIZE,
+                "batch starting at {} requested {} headers (exceeds STEP_SIZE)",
+                start,
+                count
+            );
+            assert!(
+                count <= ELECTRUM_MAX_HEADERS,
+                "batch starting at {} requested {} headers (exceeds Electrum 150-header limit)",
+                start,
+                count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_count_mainnet_full_batches() {
+        // 1,000-block window should produce 10 full batches of 100 + 1 batch of 1
+        let calls = run_batch_test(860_000, 859_000).await;
+        assert_eq!(calls.len(), 11, "expected 11 batches for a 1001-header range");
+        // First 10 batches should be full (count=100)
+        for (i, &(_, count)) in calls.iter().take(10).enumerate() {
+            assert_eq!(count, 100, "batch {} should have 100 headers", i);
+        }
+        // Last batch should be 1 header
+        assert_eq!(calls.last().unwrap().1, 1);
+    }
+
+    // --- Testnet: very high tip height ---
+
+    #[tokio::test]
+    async fn test_batch_count_under_limit_testnet() {
+        // Testnet-like tip height (~2,900,000) with a 500-block window
+        let calls = run_batch_test(2_900_000, 2_899_500).await;
+        assert!(!calls.is_empty(), "expected at least one batch fetch");
+        for &(start, count) in &calls {
+            assert!(
+                count <= ELECTRUM_MAX_HEADERS,
+                "batch starting at {} requested {} headers (exceeds Electrum 150-header limit)",
+                start,
+                count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_count_testnet_500_window() {
+        // 500-block window: 5 full batches of 100 + 1 batch of 1
+        let calls = run_batch_test(2_900_000, 2_899_500).await;
+        assert_eq!(calls.len(), 6);
+        for (i, &(_, count)) in calls.iter().take(5).enumerate() {
+            assert_eq!(count, 100, "batch {} should have 100 headers", i);
+        }
+        assert_eq!(calls.last().unwrap().1, 1);
+    }
+
+    // --- Signet: lower tip height ---
+
+    #[tokio::test]
+    async fn test_batch_count_under_limit_signet() {
+        // Signet-like tip height (~160,000) with a 1,000-block window
+        let calls = run_batch_test(160_000, 159_000).await;
+        assert!(!calls.is_empty(), "expected at least one batch fetch");
+        for &(start, count) in &calls {
+            assert!(
+                count <= ELECTRUM_MAX_HEADERS,
+                "batch starting at {} requested {} headers (exceeds Electrum 150-header limit)",
+                start,
+                count
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_count_signet_1000_window() {
+        // Same as mainnet: 10 full + 1 of 1
+        let calls = run_batch_test(160_000, 159_000).await;
+        assert_eq!(calls.len(), 11);
+        assert_eq!(calls.last().unwrap().1, 1);
+    }
+
+    // --- Edge cases ---
+
+    #[tokio::test]
+    async fn test_single_header_at_tip() {
+        // min_fork_height == tip_height: should fetch exactly 1 header
+        let calls = run_batch_test(100, 100).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (100, 1));
+    }
+
+    #[tokio::test]
+    async fn test_batch_count_exactly_step_size() {
+        // 100-header range: single batch of exactly 100
+        let calls = run_batch_test(100, 1).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (1, 100));
+    }
+
+    #[tokio::test]
+    async fn test_last_batch_smaller_than_step_size() {
+        // tip=860000, min_fork=859955: range=46, single batch of 46
+        let calls = run_batch_test(860_000, 859_955).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (859_955, 46));
+    }
+
+    #[tokio::test]
+    async fn test_batch_fetch_stops_at_min_fork_height() {
+        // tip=1000, min_fork=900: batch 1 (901..1000, count=100), batch 2 (900, count=1)
+        let calls = run_batch_test(1000, 900).await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], (901, 100));
+        assert_eq!(calls[1], (900, 1));
+    }
+
+    #[tokio::test]
+    async fn test_no_fetch_when_tip_below_min_fork_height() {
+        // tip=50, min_fork=100: tip is below min_fork_height, should not fetch
+        let calls = run_batch_test(50, 100).await;
+        assert!(calls.is_empty(), "should not fetch when tip < min_fork_height");
+    }
+
+    #[tokio::test]
+    async fn test_headers_returned_match_range() {
+        // Verify the number of HeaderInfo returned matches tip - min_fork + 1
+        let node = MockNode::new(1000);
+        let tree = empty_tree();
+        let tips = node.tips().await.unwrap();
+        let headers = node
+            .new_active_headers(&tips, &tree, 900)
+            .await
+            .unwrap();
+        // 1000 - 900 + 1 = 101 headers
+        assert_eq!(headers.len(), 101);
+    }
+}
